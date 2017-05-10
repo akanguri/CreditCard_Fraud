@@ -1,0 +1,196 @@
+---
+title: "Credit Card Fraud"
+output:
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+##### Author - Ameet Kanguri
+The datasets contains transactions made by credit cards in September 2013 by european cardholders. This dataset presents transactions that occurred in two days, where we have 492 frauds out of 284,807 transactions. 
+
+It contains only numerical input variables which are the result of a PCA transformation. Unfortunately, due to confidentiality issues, we cannot provide the original features and more background information about the data. Features V1, V2, ... V28 are the principal components obtained with PCA, the only features which have not been transformed with PCA are 'Time' and 'Amount'.  The feature 'Amount' is the transaction Amount. Feature 'Class' is the response variable and it takes value 1 in case of fraud and 0 otherwise.
+
+
+The Credit card dataset has the following fields:
+Time - How many times this card has been used.
+V1 to V28 - Features relating to the transaction, Values have been transformed
+Amount - Transaction amount
+Class - Response variable . Value 1 for fraud, 0 for normal transcations. 
+ 
+
+```{r}
+#Initialize libraries, set working directory
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+library(ggthemes)
+```
+
+Read data from Credit card
+
+```{r}
+data=read.csv('creditcard.csv')
+```
+
+Rename the Class field to Fraud
+```{r}
+colnames(data)[31] ='Fraud'
+data$Fraud=as.factor(data$Fraud)
+```
+
+Review the structure of data
+```{r}
+# Structure of data
+str(data)
+names(data)
+table(data$Fraud)
+```
+There are only 492 instances of Fraud transcations. This make it a highly unbalanced dataset.
+
+### Exploratory data analysis and data preparation
+
+Compare the Time and amount spend to see of there anything significant
+```{r}
+ggplot(data=data,aes(x=Time,y=Amount))+
+  geom_point(alpha=1,colour = 'blue', size=1)+
+  facet_grid(Fraud~.,scales = "free_y")+
+  theme_solarized()
+```
+Hard to see any pattern apart from the fact that All Fraud transactions are lesser in value
+
+Next we plot a histogram on each of the features to see if there are any visual patterns
+```{r}
+columns= names(data[,2:29])
+for (col in columns){
+  print(ggplot(data = data, aes(x = data[,col], fill = Fraud)) + 
+          geom_histogram(alpha = 0.5, bins = 50,position = 'identity',aes(y = ..density..))+
+          scale_fill_manual(values=c("#66CC99","#FF9999"))+
+          labs( x = col)+
+          geom_density(alpha = 0.5, inherit.aes = FALSE, aes(x=data[,col],colour=Fraud), data = data)+
+          scale_color_manual(values=c("#66CC99","#FF9999")))
+}
+```
+
+Going through the vizualizations, certain features have similiar distributions of data across both normal and fraud transactions. We can eliminate variables and focus on ones which show variations in patterns
+```{r}
+dropCol=c('V28','V27','V26','V25','V24','V23','V22','V20','V15','V13','V8')
+data= data[,! names(data) %in% dropCol]
+```
+
+From the earlier data points it is clear that this highly unbalanced dataset. the number of fraud transactions are .172% of the total transactions. Building a model using all the data will bias the model towards normal transactions. We can either undersample the dataset or oversample it. For oversampling a technique like SMOTE (Synthetic Minority Over-Sampling Technique). We shall use the undersampling approach here, i.e. reduce the number of normal transactions in the sample.
+1) Select all the fraud transactions and include it in the sample dataset.
+2) Select a random sample of normal transactions equal in number to the fraud transactions
+3) Combine a create the new sample dataset
+```{r}
+subPositive=subset(data, data$Fraud == 0)
+subNegative=subset(data, data$Fraud == 1)
+subPositive=subPositive[sample(nrow(subPositive),492,replace = FALSE),]
+dataSample=rbind(subNegative,subPositive)
+dataSample=dataSample[sample(nrow(dataSample)),]
+table(dataSample$Fraud)
+```
+
+From this sample build a train and test dataset to build and test our models
+```{r}
+split =sample.split(dataSample$Fraud,SplitRatio = 0.7)
+train=dataSample[split,]
+test=dataSample[!split,]
+```
+Our focus here would be build a model that would best predict a fraud transaction. So we should be focused on a model that gives the highest Specificity/Recall value. While we also want the model to have a high accuracy ratio. 
+
+First lest try  Logistic regression model to test performance
+
+```{r}
+model1=glm(train$Fraud~.,data = train,family ='binomial')
+predModel=predict(model1,test,type="response")
+ct = table(test$Fraud,predModel>.98); ct
+accuracy = sum(ct[1,1],ct[2,2])/nrow(test); accuracy
+specificity = ct[1,1]/sum(ct[1,1],ct[1,2]); specificity
+sensitivity = ct[2,2]/sum(ct[2,1],ct[2,2]); sensitivity
+```
+Accuracy            - 92.2%
+Specificity         - 99.3%
+Sensitivity/Recall  - 85.1%
+While this a good start , we need to try more models to see if we can get even better sensitivity values.
+
+
+Let us Use cross-validation to prune the tree.
+```{r}
+## Use cross-validation to prune the tree
+library(caret); library(e1071)
+set.seed(100)
+trControl = trainControl(method="cv",number = 10)
+tuneGrid = expand.grid(.cp = seq(0.001,0.1,0.0001))
+cvModel = train(Fraud~.,data=train,method="rpart",
+                trControl = trControl,tuneGrid = tuneGrid)
+treeCV = rpart(Fraud~.,data=train,
+               control=rpart.control(cp = cvModel$bestTune))
+predTreeCV = predict(treeCV,newdata=test)
+ct = table(test$Fraud,predTreeCV[,2]>.98); ct
+accuracy = sum(ct[1,1],ct[2,2])/nrow(test); accuracy
+specificity = ct[1,1]/sum(ct[1,1],ct[1,2]); specificity
+sensitivity = ct[2,2]/sum(ct[2,1],ct[2,2]); sensitivity
+```
+Accuracy            - 91.2%
+Specificity         - 97.9%
+Sensitivity/Recall  - 84.5%
+Tuning the model has not helped much and the values are almost similar with the tree model
+
+
+Let us use the random forest with Bagging.
+```{r}
+### Bagging using randomForest with mtry=ncol(train)-1
+library(randomForest)
+set.seed(100)
+bag = randomForest(Fraud~.,data=train,mtry = ncol(train)-1,ntree=1000)
+predBag = predict(bag,newdata=test)
+
+ct = table(test$Fraud,predBag); ct
+accuracy = sum(ct[1,1],ct[2,2])/nrow(test); accuracy
+specificity = ct[1,1]/sum(ct[1,1],ct[1,2]); specificity
+sensitivity = ct[2,2]/sum(ct[2,1],ct[2,2]); sensitivity
+```
+Accuracy            - 92.9%
+Specificity         - 95.9%
+Sensitivity/Recall  - 89.8%
+This model seems to have done very well.
+
+Let us run the regular random Forest model and see how that performs
+```{r}
+## Random Forest Accuracy -94.5%, Specificity-98.6%, Sensitivity-90.5%
+set.seed(100)
+forest = randomForest(Fraud~.,data=train,ntree = 1000)
+predForest = predict(forest,newdata=test)
+
+ct = table(test$Fraud,predForest); ct
+accuracy = sum(ct[1,1],ct[2,2])/nrow(test); accuracy
+specificity = ct[1,1]/sum(ct[1,1],ct[1,2]); specificity
+sensitivity = ct[2,2]/sum(ct[2,1],ct[2,2]); sensitivity
+
+```
+Accuracy            - 94.5%
+Specificity         - 98.6%
+Sensitivity/Recall  - 90.5%
+This model has performed the best on our test data set
+Applying this on the complete dataset to the see the results.
+```{r}
+predForest = predict(forest,newdata=data)
+ct = table(data$Fraud,predForest); ct
+accuracy = sum(ct[1,1],ct[2,2])/nrow(data); accuracy
+specificity = ct[1,1]/sum(ct[1,1],ct[1,2]); specificity
+sensitivity = ct[2,2]/sum(ct[2,1],ct[2,2]); sensitivity
+```
+Accuracy            - 97.17%
+Specificity         - 97.17%
+Sensitivity/Recall  - 97.15%
+
+Which features have the most influence on credit card fraud occurance?
+```{r}
+varImpPlot(forest)   ## see variable importance
+```
+
+Conclusion:
+The Random forest model is  best suited to get a hight specificity and accuracy in this scenario. Parameters what influence fraud the most are V14,V10,V4,V12,V11.
+
+
